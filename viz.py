@@ -373,15 +373,27 @@ def process_video(video_path: os.path, log: bool = False, f_skip: int = 1):
     frame_pose_mats = torch.tensor(frame_pose_mats)
 
     # Load point cloud
+    initial_pose = frame_pose_mats[0]
     print("Initial pose:", metadata["initPose"])
     print("Initial pose mat:", get_mat_from_pose(metadata["initPose"]))
 
     viz_frame_idx = 0
     pcd_unproj_all = torch.zeros((num_viz_frames*depth_h*depth_w, 6), dtype=torch.float64)
+    pcd_ply_all = []
+    orig_world_all = torch.zeros((num_viz_frames*100, 3), dtype=torch.float64)
     for frame_idx in range(0, num_frames, f_skip):
         depth = depth_frames[viz_frame_idx]
         feats = [torch.randn((1, 3, depth_h, depth_w))]
         pose = frame_pose_mats[viz_frame_idx]
+        pose = torch.matmul(torch.linalg.inv(initial_pose), pose)
+        
+        #### DEBUG ####
+        orig_cam = torch.zeros(4, 1, dtype=torch.float64)
+        orig_cam[3, 0] = 1.
+        orig_world = torch.matmul(pose, orig_cam).T
+        orig_world_all[viz_frame_idx] = orig_world[:, :3]
+        #### DEBUG ####
+        
         cam_int_hom = torch.eye(4, dtype=torch.float64)
         cam_int_hom[:3, :3] = torch.tensor(frame_cam_int[viz_frame_idx])
         # Adjust for resizing
@@ -402,11 +414,10 @@ def process_video(video_path: os.path, log: bool = False, f_skip: int = 1):
         pcd_unproj = np.concatenate([world_coords.numpy(), 255.0 * color_valid.numpy()], 1)
         pcd_unproj_all[viz_frame_idx*depth_h*depth_w:(viz_frame_idx+1)*depth_h*depth_w] = torch.tensor(pcd_unproj, dtype=torch.float64)
         plot_3d(
-            x_data.numpy(),
-            z_data.numpy(),
+            -x_data.numpy(),
+            -z_data.numpy(),
             y_data.numpy(),
             color=color_valid.cpu().numpy(),
-            view=(45,-45)
         )
 
         plt.savefig("sensor_depth.png")
@@ -416,28 +427,58 @@ def process_video(video_path: os.path, log: bool = False, f_skip: int = 1):
             os.path.join(video_path, "pcd", f"{frame_idx:07d}.ply")
         )
         pcd_coords = torch.tensor(pcd_coords, dtype=torch.float64)
+        pcd_coords = torch.cat([pcd_coords, torch.ones(pcd_coords.shape[0], 1, dtype=torch.float64)], dim=1)
         pcd_colors = torch.tensor(pcd_colors)
+        
+        #### DEBUG ####
+        pcd_before_transform = torch.cat([pcd_coords[:, :3], pcd_colors], dim=1)
+        #### DEBUG ####
+        
         # Transform point cloud to world frame
-        pcd_coords = torch.matmul(pcd_coords, pose[:3, :3].T)
-
-        pcd_all = torch.cat([pcd_coords, pcd_colors], dim=1)
+        # import ipdb; ipdb.set_trace()
+        pcd_coords = torch.matmul(pcd_coords, pose.T)
+        pcd_ply = torch.cat([pcd_coords[:, :3], pcd_colors], dim=1)
+        pcd_ply_all.append(pcd_ply.numpy())
+        
+        #### DEBUG ####
+        pcd_ply = torch.cat([pcd_ply, pcd_before_transform], dim=0)
+        #### DEBUG ####
+        
         plot_3d(
-            pcd_coords[:, 0].numpy(),
-            pcd_coords[:, 2].numpy(),
-            pcd_coords[:, 1].numpy(),
-            color=pcd_colors.numpy() / 255.0,
+            pcd_ply[:, 0].numpy(),
+            pcd_ply[:, 2].numpy(),
+            pcd_ply[:, 1].numpy(),
+            color=pcd_ply[:, 3:].numpy() / 255.0,
         )
         plt.savefig("pcd.png")
         plt.close()
-        # import ipdb; ipdb.set_trace()
         if log:
-            save_log(depth, rgb_frames[viz_frame_idx], pcd_all.numpy(), pcd_unproj, near_plane, far_plane)
+            save_log(depth, rgb_frames[viz_frame_idx], pcd_ply.numpy(), pcd_unproj, near_plane, far_plane)
         viz_frame_idx += 1
 
-    wandb.log({"pcd_unproj_all": wandb.Object3D(pcd_unproj_all.numpy())})
+    pcd_ply_all = np.concatenate(pcd_ply_all, axis=0)
+    plot_3d(
+        orig_world_all[:, 0].numpy(),
+        orig_world_all[:, 2].numpy(),
+        orig_world_all[:, 1].numpy(),
+    )
+    print(orig_world_all)
+    plt.savefig("orig_world.png")
+    plt.close()
+    plot_3d(
+        pcd_ply_all[:, 0],
+        pcd_ply_all[:, 2],
+        pcd_ply_all[:, 1],
+        color=pcd_ply_all[:, 3:] / 255.0,
+    )
+    plt.savefig("pcd_all.png")
+    plt.close()
+    # if log:
+    #     pcd_ply_all = np.concatenate(pcd_ply_all, axis=0)
+    #     wandb.log({"pcd_ply_all": wandb.Object3D(pcd_ply_all)})
+        # wandb.log({"pcd_unproj_all": wandb.Object3D(pcd_unproj_all.numpy())})
 
 data_root = "tests/test_vids"
-# wandb.init(project='r3d-viz')
 
 for vid in os.listdir(data_root):
     vid_path = os.path.join(data_root, vid)
